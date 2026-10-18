@@ -4,15 +4,24 @@ import { DOT_GOAL_SIGNAL, MEMORY_MUTATION_TASK_QUEUE, dummyTurnInputSchema, memo
 import { deferred, eventsOf, type WorkflowScenario } from "./temporal-test-harness.js";
 import { setImmediate as yieldTransport } from "node:timers/promises";
 
+/**
+ * Create a retryable synthetic failure with a fixed stack that omits local environment details.
+ */
 export function syntheticFailure() {
   const error = new Error("Synthetic transient activity failure");
   error.stack = "Error: Synthetic transient activity failure";
   return error;
 }
+/**
+ * Build schema-checked synthetic turn input, with explicit scenario overrides applied last.
+ */
 export const turnInput = (extra = {}) => dummyTurnInputSchema.parse({
   roomId: "room:synthetic", paneId: "pane:synthetic", prompt: "Synthetic workflow test",
   traceId: "trace:synthetic", ...extra
 });
+/**
+ * Create the synthetic completed-turn response expected from an activity stub.
+ */
 export const turnResult = (input: any) => ({
   workflowId: "workflow:synthetic-result", roomId: input.roomId, paneId: input.paneId,
   traceId: input.traceId, status: "COMPLETED", message: "Synthetic result"

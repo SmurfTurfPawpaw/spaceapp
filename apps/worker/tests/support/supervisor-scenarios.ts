@@ -16,12 +16,20 @@ import type { ScenarioContext, WorkflowScenario } from "./temporal-test-harness.
 type StartedHandle = WorkflowHandle & { firstExecutionRunId?: string };
 type SupervisorScenarioContext = ScenarioContext;
 type SupervisorScenario = WorkflowScenario;
+/**
+ * Expose a promise and its settlement callbacks for explicit host/activity synchronization.
+ * Settling it does not advance the Temporal test server clock.
+ */
 function deferred<T = void>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
   let reject!: (reason?: unknown) => void;
   const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 }
+/**
+ * Bound a host-side wait and identify the stalled observation in the error.
+ * Always clear the timer; timing out does not cancel the supplied promise.
+ */
 async function deadline<T>(promise: Promise<T>, label: string, ms = 20_000): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -32,6 +40,10 @@ async function deadline<T>(promise: Promise<T>, label: string, ms = 20_000): Pro
 }
 // The zero-delay yield synchronizes transport callbacks only. Every workflow timer
 // is advanced by the real test server, never by this host timer.
+/**
+ * Advance the real test-server clock one second at a time until ready is observed.
+ * Host yields only drain transport callbacks; both the step count and wall-clock deadline bound the wait.
+ */
 async function pump(ctx: SupervisorScenarioContext, ready: () => boolean, label: string, max = 1_200) {
   const expires = Date.now() + 20_000;
   for (let i = 0; i < max && Date.now() < expires && !ready(); i++) {
@@ -40,15 +52,26 @@ async function pump(ctx: SupervisorScenarioContext, ready: () => boolean, label:
   }
   assert.ok(ready(), `No observed ${label} after ${max} real server-clock steps`);
 }
+/**
+ * Return a handle pinned to the native firstExecutionRunId for first-run assertions.
+ * Fail if the scenario starter did not preserve that run identity.
+ */
 function firstRun(ctx: SupervisorScenarioContext, handle: StartedHandle): WorkflowHandle {
   assert.equal(typeof handle.firstExecutionRunId, "string", "ctx.start must preserve native firstExecutionRunId");
   return ctx.client.workflow.getHandle(handle.workflowId, handle.firstExecutionRunId);
 }
+/**
+ * Decode a test payload only after checking the default json/plain encoding and data.
+ */
 function decodeJsonPayload(payload: any) {
   assert.ok(payload?.data, "Expected default JSON payload");
   assert.equal(Buffer.from(payload.metadata?.encoding ?? []).toString(), "json/plain");
   return JSON.parse(Buffer.from(payload.data).toString("utf8"));
 }
+/**
+ * Await the pinned execution with followRuns disabled and require actual continue-as-new.
+ * Return its schema-checked carried input, first-run history and next run ID.
+ */
 async function continuedInput(ctx: SupervisorScenarioContext, pinned: WorkflowHandle) {
   const { runId } = await pinned.describe();
   const firstOnly = ctx.client.workflow.getHandle(pinned.workflowId, runId, { followRuns: false });
@@ -62,6 +85,9 @@ async function continuedInput(ctx: SupervisorScenarioContext, pinned: WorkflowHa
   return { input: roomAgentSupervisorInputSchema.parse(decodeJsonPayload(attrs.input?.payloads?.[0])), history, nextRunId: attrs.newExecutionRunId as string };
 }
 
+/**
+ * Construct a schema-checked synthetic supervisor item with explicit mission and room identity.
+ */
 function queued(suffix: string, missionId = `mission:${suffix}`, roomId = "room:supervisor-synthetic") {
   return roomAgentSupervisorQueueItemSchema.parse({ missionId, turn: {
     roomId, paneId: "pane:supervisor-synthetic", prompt: `Synthetic request ${suffix}`,
@@ -69,11 +95,19 @@ function queued(suffix: string, missionId = `mission:${suffix}`, roomId = "room:
     agentRunId: `agent_run:${suffix}`, traceId: `trace:${suffix}`,
   } });
 }
+/**
+ * Create a synthetic successful turn outcome with optional pending action IDs.
+ * This fixture shape is not evidence of an external task or customer result.
+ */
 function verified(pendingActionIds: string[] = []) {
   return { status: "COMPLETED", message: "Synthetic verified result", roomAgentOutcome: {
     status: "VERIFIED", executedActionCount: 1, pendingActionIds, statusReason: "Verified remaining request.",
   } };
 }
+/**
+ * Install synthetic supervisor activity defaults and collect forwarded calls for assertions.
+ * Individual scenarios replace these stubs when exercising failure, signals or continuation.
+ */
 function installBasic(ctx: SupervisorScenarioContext) {
   const calls = { turns: [] as any[], started: [] as any[], finished: [] as any[],
     continued: [] as any[], checked: [] as any[], discarded: [] as any[] };
@@ -90,6 +124,10 @@ function installBasic(ctx: SupervisorScenarioContext) {
   });
   return calls;
 }
+/**
+ * Adapt real continuation functions to an isolated in-memory fixture store.
+ * Collect prepared, executed, discarded and finished turns without provider or database access.
+ */
 function fixtureDriver(ctx: SupervisorScenarioContext) {
   const c = continuationFixture();
   const prepared: RoomAgentSupervisorQueueItem[] = [];
@@ -118,6 +156,9 @@ function fixtureDriver(ctx: SupervisorScenarioContext) {
   const input = roomAgentSupervisorInputSchema.parse({ roomId: c.room.id, monitoringMissionIds: [c.initial.mission.id] });
   return { ...c, input, prepared, turns, discarded, finished };
 }
+/**
+ * Collect nested cause messages so a test can assert persisted activity-failure context.
+ */
 function causeMessages(error: unknown) {
   const messages: string[] = [];
   for (let e = error as any; e; e = e.cause) messages.push(String(e.message ?? e));
@@ -164,6 +205,10 @@ const allocation: SupervisorScenario = {
     await ctx.capture(h, "supervisor-current");
   },
 };
+/**
+ * Build the race where stop or follow-up arrives before a READY activity reply.
+ * The scenario checks that the obsolete prepared continuation is retired.
+ */
 function readyRace(kind: "stop" | "follow-up"): SupervisorScenario {
   return {
     name: `prepared continuation retired after ${kind} before activity reply`, workflowType: "roomAgentSupervisorWorkflow",
@@ -269,6 +314,10 @@ const legacySettle: SupervisorScenario = {
     await ctx.capture(h, "supervisor-prepatch");
   },
 };
+/**
+ * Build current or legacy signal coverage that cancels the active child and retains other work.
+ * Heartbeat synchronization observes actual activity cancellation before checking queued outcomes.
+ */
 function interruptRunning(legacy: boolean): SupervisorScenario {
   return {
     name: `${legacy ? "prepatch" : "current"} real enqueue stop and active child cancellation`,
@@ -308,6 +357,10 @@ function interruptRunning(legacy: boolean): SupervisorScenario {
     },
   };
 }
+/**
+ * Build the 50-processed continuation case for the selected supervisor branch.
+ * Assert that branch's distinct pending/interrupted state and retained monitoring cross the boundary.
+ */
 function processed50(legacy: boolean): SupervisorScenario {
   return {
     name: `${legacy ? "prepatch" : "current"}50processed continuation preserves carried state`,
@@ -334,6 +387,10 @@ function processed50(legacy: boolean): SupervisorScenario {
     },
   };
 }
+/**
+ * Build the 250-poll continuation case and count polls by execution run.
+ * Require 250 actual first-run one-second timers and unchanged monitoring in the next input.
+ */
 function polled250(legacy: boolean): SupervisorScenario {
   return {
     name: `${legacy ? "prepatch" : "current"}250one-second polls continue with monitoring intact`,

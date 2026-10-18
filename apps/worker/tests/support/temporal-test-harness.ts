@@ -38,6 +38,10 @@ const activityNames = [
 ] as const;
 const bundles = new Map<string, Promise<WorkflowBundle>>();
 
+/**
+ * Cache real workflow bundles separately for current, legacy and incompatible negative tests.
+ * Only the legacy bundle applies the single-guard test loader.
+ */
 export function workflowBundle(mode: "current" | "legacy" | "negative" = "current"): Promise<WorkflowBundle> {
   let cached = bundles.get(mode);
   if (!cached) {
@@ -58,6 +62,9 @@ export function workflowBundle(mode: "current" | "legacy" | "negative" = "curren
   return cached;
 }
 
+/**
+ * Expose promise settlement callbacks so a scenario can synchronize with an activity.
+ */
 export function deferred<T = void>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
   let reject!: (reason?: unknown) => void;
@@ -65,11 +72,19 @@ export function deferred<T = void>() {
   return { promise, resolve, reject };
 }
 
+/**
+ * Create a real time-skipping Temporal test server with a synthetic client identity.
+ * The caller owns teardown; this does not connect to an operator installation.
+ */
 export async function createTestEnvironment() {
   Runtime.install({ logger: new DefaultLogger("ERROR") });
   return TestWorkflowEnvironment.createTimeSkipping({ client: { identity: "spaceapp-workflow-test-client" } });
 }
 
+/**
+ * Terminate an execution chain started by this scenario, including continue-as-new races.
+ * Re-check status after a not-found termination response and bound retries by a host deadline.
+ */
 async function stopOwnedChain(handle: WorkflowHandle) {
   const expires = Date.now() + 5_000;
   for (;;) {
@@ -85,6 +100,11 @@ async function stopOwnedChain(handle: WorkflowHandle) {
 }
 
 // One environment, serial scenarios: virtual time is global to the server.
+/**
+ * Run real workflow code with only activities stubbed and capture explicitly requested first-run histories.
+ * Supervisors get dedicated servers; finite scenarios share serial virtual time.
+ * Bound host execution and clean owned chains, workers and dedicated environments on completion or failure.
+ */
 export async function runScenario(env: TestWorkflowEnvironment, scenario: WorkflowScenario, isolated = false): Promise<CapturedHistory[]> {
   // Supervisors deliberately never return. Give each one its own server so
   // terminating a continued execution cannot affect another case's global
@@ -158,7 +178,13 @@ export async function runScenario(env: TestWorkflowEnvironment, scenario: Workfl
   }
 }
 
+/**
+ * Coerce an event type to its string representation without translating numeric enum values.
+ */
 export function eventName(event: any): string { return String(event.eventType); }
+/**
+ * Select a Temporal event suffix after protobuf histories have been converted to their JSON form.
+ */
 export function eventsOf(history: History, suffix: string) {
   // JSON histories use enum strings; fetched protobuf histories use numbers.
   return JSON.parse(JSON.stringify(history)).events.filter((event: any) => eventName(event) === `EVENT_TYPE_${suffix}`);

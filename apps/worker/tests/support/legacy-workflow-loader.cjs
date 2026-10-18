@@ -1,4 +1,8 @@
 const path = require("node:path");
+/**
+ * Build a pre-patch test bundle by replacing exactly one continuation guard with false.
+ * Reject an unexpected guard count; return transformed source without writing production files.
+ */
 module.exports = function legacySupervisor(source) {
   if (!this.resourcePath.endsWith(path.join("src", "workflows.ts"))) return source;
   const guard = 'patched("room-background-continuation-v1")';
